@@ -359,7 +359,7 @@ export default {
   'panneau.adresseIntrouvable': 'Adresse non trouvée.',
   'panneau.adresseCourte': 'Adresse trop courte (min 5 car.)',
   'panneau.preuveDe': 'Preuve - {label}',
-  'panneau.erreurUpload': "Échec de l'envoi de l'image.",
+  'panneau.erreurUpload': "Échec de l'envoi du fichier.",
   'panneau.titre.creeLe': 'Créée le {date}',
   'panneau.titre.creePar': 'Fiche créée par {nom}',
 

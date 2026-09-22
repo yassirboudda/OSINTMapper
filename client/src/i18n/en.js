@@ -348,7 +348,7 @@ export default {
   'panneau.adresseIntrouvable': 'Address not found.',
   'panneau.adresseCourte': 'Address too short (min. 5 chars)',
   'panneau.preuveDe': 'Evidence - {label}',
-  'panneau.erreurUpload': 'Image upload failed.',
+  'panneau.erreurUpload': 'File upload failed.',
   'panneau.titre.creeLe': 'Created on {date}',
   'panneau.titre.creePar': 'Record created by {nom}',
 

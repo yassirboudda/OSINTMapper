@@ -348,7 +348,7 @@ export default {
   'panneau.adresseIntrouvable': 'Adresse nicht gefunden.',
   'panneau.adresseCourte': 'Adresse zu kurz (mind. 5 Zeichen)',
   'panneau.preuveDe': 'Beweis - {label}',
-  'panneau.erreurUpload': 'Das Hochladen des Bildes ist fehlgeschlagen.',
+  'panneau.erreurUpload': 'Das Hochladen der Datei ist fehlgeschlagen.',
   'panneau.titre.creeLe': 'Erstellt am {date}',
   'panneau.titre.creePar': 'Datensatz erstellt von {nom}',
 
