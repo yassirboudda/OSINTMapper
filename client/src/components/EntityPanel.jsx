@@ -210,30 +210,118 @@ function EntityView({ entity, t, updateEntity, deleteEntity, duplicateEntity, li
   const meta = entity.metadata || {};
   const entityLinks = links.filter(l => l.from === selectedId || l.to === selectedId);
 
-  const upMeta = (patch) => updateEntity(selectedId, { metadata: { ...meta, ...patch } });
+  // Toujours partir de l'entité courante (etat frais) pour ne pas écraser
+  // d'autres champs metadata entre deux updates asynchrones.
+  const upMeta = (patch) => updateEntity(selectedId, (e) => ({
+    metadata: { ...(e.metadata || {}), ...patch },
+  }));
 
-  /** Applique le résultat d'upload : photo si image, + entrée dans metadata.files. */
-  const applyUpload = useCallback((json, originalName, currentMeta, currentEntity) => {
-    const m = currentMeta || {};
-    const entry = {
-      url: json.url,
-      name: json.filename || originalName || json.url,
-      ext: json.ext,
-      size: json.size,
-      kind: json.kind,
-    };
-    const files = [...(Array.isArray(m.files) ? m.files : []), entry];
-    if (json.kind === 'image') {
-      updateEntity(selectedId, { metadata: { ...m, photo: json.url, files } });
-    } else {
-      updateEntity(selectedId, { metadata: { ...m, files } });
-      if ((currentEntity?.type === 'document' || currentEntity?.subtype === 'doc_other' || currentEntity?.subtype === 'document') && !currentEntity?.description) {
-        updateEntity(selectedId, { description: json.url });
+  const toFileEntry = (json, originalName) => ({
+    url: json.url,
+    name: json.filename || originalName || json.url,
+    ext: json.ext,
+    size: json.size,
+    kind: json.kind,
+  });
+
+  const isImageEntry = (f) => f && (f.kind === 'image' || /^(png|jpe?g|gif|webp)$/i.test(f.ext || '') || /\.(png|jpe?g|gif|webp)(\?|$)/i.test(f.url || ''));
+
+  /**
+   * Ajoute des images à la galerie (metadata.files) SANS écraser les existantes.
+   * Si une photo d'avatar existe déjà, elle est conservée et aussi listée dans files.
+   * metadata.photo (avatar graphe) n'est définie que si elle était vide.
+   */
+  const addEntityImages = useCallback((entries) => {
+    if (!entries?.length) return;
+    updateEntity(selectedId, (e) => {
+      const m = e.metadata || {};
+      let files = Array.isArray(m.files) ? [...m.files] : [];
+      const urls = new Set(files.map((f) => f.url).filter(Boolean));
+
+      // Garder l'ancienne photo dans la galerie si elle n'y est pas encore.
+      if (m.photo && !urls.has(m.photo)) {
+        const name = String(m.photo).split('/').pop() || 'photo';
+        const ext = (name.split('.').pop() || 'png').toLowerCase();
+        files.unshift({ url: m.photo, name, ext, kind: 'image' });
+        urls.add(m.photo);
       }
-    }
+
+      for (const entry of entries) {
+        if (!entry?.url || urls.has(entry.url)) continue;
+        files.push({ ...entry, kind: entry.kind || 'image' });
+        urls.add(entry.url);
+      }
+
+      // Avatar graphe : première image, jamais remplacée automatiquement.
+      const photo = m.photo || entries[0]?.url || '';
+      return { metadata: { ...m, photo, files } };
+    });
   }, [selectedId, updateEntity]);
 
-  // Ctrl+V / Cmd+V : coller une capture d'écran depuis le presse-papiers → photo de l'entité.
+  /** Ajoute des pièces jointes (docs + images) — n'écrase jamais photo ni fichiers existants. */
+  const appendAttachedFiles = useCallback((entries) => {
+    if (!entries?.length) return;
+    updateEntity(selectedId, (e) => {
+      const m = e.metadata || {};
+      let files = Array.isArray(m.files) ? [...m.files] : [];
+      const urls = new Set(files.map((f) => f.url).filter(Boolean));
+      if (m.photo && !urls.has(m.photo)) {
+        const name = String(m.photo).split('/').pop() || 'photo';
+        files.unshift({ url: m.photo, name, ext: (name.split('.').pop() || '').toLowerCase(), kind: 'image' });
+        urls.add(m.photo);
+      }
+      for (const entry of entries) {
+        if (!entry?.url || urls.has(entry.url)) continue;
+        files.push(entry);
+        urls.add(entry.url);
+      }
+      const patch = { metadata: { ...m, files } };
+      if ((e.type === 'document' || e.subtype === 'doc_other' || e.subtype === 'document') && !e.description) {
+        patch.description = entries[0].url;
+      }
+      return patch;
+    });
+  }, [selectedId, updateEntity]);
+
+  const uploadMany = useCallback(async (fileList, { asImages = false, maxBytes } = {}) => {
+    const list = Array.from(fileList || []).filter(Boolean);
+    if (!list.length) return;
+    const entries = [];
+    for (const f of list) {
+      if (f.size > maxBytes) {
+        alert(asImages ? tr('panneau.imageTropLourde') : tr('panneau.fichierTropLourd'));
+        continue;
+      }
+      try {
+        const data = await readFileAsDataUri(f);
+        const json = await uploadDataUri(data, caseId, f.name);
+        entries.push(toFileEntry(json, f.name));
+      } catch (err) {
+        alert(tr('panneau.erreur', { message: err.message }));
+      }
+    }
+    if (!entries.length) return;
+    if (asImages) addEntityImages(entries);
+    else appendAttachedFiles(entries);
+  }, [caseId, tr, addEntityImages, appendAttachedFiles]);
+
+  // Galerie : photo avatar + toutes les images dans files (dédupliquées).
+  const imageGallery = useMemo(() => {
+    const out = [];
+    const seen = new Set();
+    const push = (url, name) => {
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      out.push({ url, name: name || url.split('/').pop() || 'image' });
+    };
+    if (meta.photo) push(meta.photo, 'avatar');
+    for (const f of (Array.isArray(meta.files) ? meta.files : [])) {
+      if (isImageEntry(f)) push(f.url, f.name);
+    }
+    return out;
+  }, [meta.photo, meta.files]);
+
+  // Ctrl+V : ajoute la capture à la galerie, sans écraser les images déjà là.
   useEffect(() => {
     if (isViewer || !selectedId || !caseId) return undefined;
     const onPaste = async (e) => {
@@ -258,7 +346,7 @@ function EntityView({ entity, t, updateEntity, deleteEntity, duplicateEntity, li
         }
         const data = await readFileAsDataUri(imageFile);
         const json = await uploadDataUri(data, caseId, imageFile.name || 'clipboard.png');
-        applyUpload(json, imageFile.name || 'clipboard.png', meta, entity);
+        addEntityImages([toFileEntry(json, imageFile.name || 'clipboard.png')]);
         logAction?.(tr('panneau.imageCollee'));
       } catch (err) {
         alert(tr('panneau.erreur', { message: err.message }));
@@ -266,7 +354,7 @@ function EntityView({ entity, t, updateEntity, deleteEntity, duplicateEntity, li
     };
     window.addEventListener('paste', onPaste);
     return () => window.removeEventListener('paste', onPaste);
-  }, [isViewer, selectedId, caseId, applyUpload, tr, logAction, meta, entity]);
+  }, [isViewer, selectedId, caseId, addEntityImages, tr, logAction]);
 
   // Plugin tabs (entity-tab hook)
   const pluginTabs = useMemo(() => {
@@ -406,59 +494,92 @@ function EntityView({ entity, t, updateEntity, deleteEntity, duplicateEntity, li
 
         </Section>
         <Section t={t} title={tr('panneau.section.media')} icon="🖼️">
-          {/* Photo */}
-          <Fl label={tr('panneau.champ.photo')} t={t}><input value={meta.photo?.startsWith('/api/') ? meta.photo : (meta.photo || '')} readOnly={isViewer} onChange={e => upMeta({ photo: e.target.value })} placeholder={tr('panneau.ph.url')} style={inp(t)} /></Fl>
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+          {/* Galerie d'images : chaque upload s'ajoute, rien n'est écrasé */}
+          <Fl label={tr('panneau.champ.photo')} t={t}>
+            <input value={meta.photo?.startsWith('/api/') ? meta.photo : (meta.photo || '')} readOnly={isViewer} onChange={e => upMeta({ photo: e.target.value })} placeholder={tr('panneau.ph.url')} style={inp(t)} />
+          </Fl>
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap', marginTop: 4 }}>
             {!isViewer && <button type="button" onClick={() => {
               const fi = document.createElement('input');
               fi.type = 'file';
               fi.accept = ACCEPT_IMAGES;
+              fi.multiple = true;
               fi.onchange = async (e) => {
-                const f = e.target.files[0];
-                if (!f) return;
-                if (f.size > 10 * 1024 * 1024) { alert(tr('panneau.imageTropLourde')); return; }
-                try {
-                  const data = await readFileAsDataUri(f);
-                  const json = await uploadDataUri(data, caseId, f.name);
-                  applyUpload(json, f.name, meta, entity);
-                } catch (err) {
-                  alert(tr('panneau.erreur', { message: err.message }));
-                }
+                await uploadMany(e.target.files, { asImages: true, maxBytes: 10 * 1024 * 1024 });
               };
               fi.click();
             }} style={{ padding: '6px 12px', background: t.accent, color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>📷 {tr('panneau.importerImage')}</button>}
-            {meta.photo && !isViewer && <button type="button" onClick={() => upMeta({ photo: '' })} style={{ padding: '6px 8px', background: '#ef444420', color: '#ef4444', border: '1px solid #ef444440', borderRadius: 6, cursor: 'pointer', fontSize: 11 }}>✕ {tr('panneau.supprimer')}</button>}
           </div>
-          {meta.photo && <img src={meta.photo} alt="" style={{ width: '100%', borderRadius: 8, maxHeight: 150, objectFit: 'cover', marginTop: 6 }} onError={e => { e.target.style.display = 'none'; }} />}
+          {imageGallery.length > 0 && (
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(96px, 1fr))', gap: 8, marginTop: 8 }}>
+              {imageGallery.map((img) => {
+                const isAvatar = meta.photo === img.url;
+                return (
+                  <div key={img.url} style={{ position: 'relative', borderRadius: 8, overflow: 'hidden', border: `2px solid ${isAvatar ? t.accent : t.border}`, background: t.surfaceAlt }}>
+                    <a href={img.url} target="_blank" rel="noopener noreferrer">
+                      <img src={img.url} alt={img.name} style={{ width: '100%', height: 88, objectFit: 'cover', display: 'block' }} onError={e => { e.target.style.opacity = '0.3'; }} />
+                    </a>
+                    {!isViewer && (
+                      <div style={{ display: 'flex', gap: 2, padding: 4, background: t.surface }}>
+                        {!isAvatar && (
+                          <button type="button" title={tr('panneau.definirAvatar')} onClick={() => upMeta({ photo: img.url })} style={{ flex: 1, fontSize: 9, padding: '2px 4px', border: `1px solid ${t.border}`, borderRadius: 4, background: t.surfaceAlt, color: t.textSecondary, cursor: 'pointer' }}>★</button>
+                        )}
+                        {isAvatar && <span style={{ flex: 1, fontSize: 9, textAlign: 'center', color: t.accent, fontWeight: 700 }}>★</span>}
+                        <button type="button" title={tr('panneau.supprimer')} onClick={() => updateEntity(selectedId, (e) => {
+                          const m = e.metadata || {};
+                          const files = (Array.isArray(m.files) ? m.files : []).filter((f) => f.url !== img.url);
+                          const photo = m.photo === img.url ? (files.find(isImageEntry)?.url || '') : m.photo;
+                          return { metadata: { ...m, photo, files } };
+                        })} style={{ fontSize: 9, padding: '2px 6px', border: 'none', borderRadius: 4, background: '#ef444420', color: '#ef4444', cursor: 'pointer' }}>✕</button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
           {!isViewer && <div style={{ fontSize: 9, color: t.textMuted, marginTop: 4 }}>{tr('panneau.collerHint')}</div>}
 
-          {/* Fichiers joints (PDF, ODS, JSON…) — allowlist serveur + signatures */}
+          {/* Fichiers joints — multi-upload, preview par fichier */}
           <Fl label={tr('panneau.champ.fichiers')} t={t}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 6 }}>
-              {(Array.isArray(meta.files) ? meta.files : []).map((f, idx) => (
-                <div key={(f.url || '') + idx} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', background: t.surfaceAlt, borderRadius: 6, fontSize: 11 }}>
-                  <span>📄</span>
-                  <a href={f.url} target="_blank" rel="noopener noreferrer" style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.accent, fontWeight: 600, textDecoration: 'none' }}>{f.name || f.url || '?'}</a>
-                  <span style={{ fontSize: 9, color: t.textMuted }}>{(f.ext || '').toUpperCase()}</span>
-                  {!isViewer && <button type="button" onClick={() => upMeta({ files: (meta.files || []).filter((_, i) => i !== idx) })} style={{ padding: '2px 6px', background: 'transparent', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 11 }} title={tr('panneau.supprimer')}>✕</button>}
-                </div>
-              ))}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 6 }}>
+              {(Array.isArray(meta.files) ? meta.files : []).map((f, idx) => {
+                const isImg = isImageEntry(f);
+                return (
+                  <div key={(f.url || '') + idx} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px', background: t.surfaceAlt, borderRadius: 8, fontSize: 11 }}>
+                    {isImg && f.url ? (
+                      <a href={f.url} target="_blank" rel="noopener noreferrer" style={{ flexShrink: 0 }}>
+                        <img src={f.url} alt="" style={{ width: 48, height: 48, objectFit: 'cover', borderRadius: 6, border: `1px solid ${t.border}` }} onError={e => { e.target.style.display = 'none'; }} />
+                      </a>
+                    ) : (
+                      <div style={{ width: 48, height: 48, borderRadius: 6, background: t.surface, border: `1px solid ${t.border}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20, flexShrink: 0 }}>📄</div>
+                    )}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <a href={f.url} target="_blank" rel="noopener noreferrer" style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.accent, fontWeight: 600, textDecoration: 'none' }}>{f.name || f.url || '?'}</a>
+                      <div style={{ fontSize: 9, color: t.textMuted, marginTop: 2 }}>
+                        {(f.ext || '').toUpperCase()}{f.size ? ` · ${(f.size / 1024).toFixed(0)} Ko` : ''}
+                      </div>
+                    </div>
+                    {!isViewer && <button type="button" onClick={() => updateEntity(selectedId, (e) => {
+                      const m = e.metadata || {};
+                      const files = (Array.isArray(m.files) ? m.files : []).filter((_, i) => i !== idx);
+                      const removed = (Array.isArray(m.files) ? m.files : [])[idx];
+                      const photo = removed?.url && m.photo === removed.url
+                        ? (files.find(isImageEntry)?.url || '')
+                        : m.photo;
+                      return { metadata: { ...m, photo, files } };
+                    })} style={{ padding: '2px 6px', background: 'transparent', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 11 }} title={tr('panneau.supprimer')}>✕</button>}
+                  </div>
+                );
+              })}
             </div>
             {!isViewer && <button type="button" onClick={() => {
               const fi = document.createElement('input');
               fi.type = 'file';
               fi.accept = ACCEPT_FILES;
+              fi.multiple = true;
               fi.onchange = async (e) => {
-                const f = e.target.files[0];
-                if (!f) return;
-                if (f.size > 25 * 1024 * 1024) { alert(tr('panneau.fichierTropLourd')); return; }
-                try {
-                  const data = await readFileAsDataUri(f);
-                  const json = await uploadDataUri(data, caseId, f.name);
-                  applyUpload(json, f.name, meta, entity);
-                } catch (err) {
-                  alert(tr('panneau.erreur', { message: err.message }));
-                }
+                await uploadMany(e.target.files, { asImages: false, maxBytes: 25 * 1024 * 1024 });
               };
               fi.click();
             }} style={{ width: '100%', padding: '8px 12px', background: t.accent, color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>📎 {tr('panneau.importerFichier')}</button>}
