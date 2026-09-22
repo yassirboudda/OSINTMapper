@@ -1,8 +1,41 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { buildPluginContext } from '../plugins/core/context.js';
 import { PluginErrorBoundary } from '../plugins/core/ErrorBoundary.jsx';
 import { getLocale, traduire, useT } from '../i18n';
 import { libellePlugin } from '../lib/constantesTraduites.js';
+
+/** Extensions / MIME acceptés côté file picker (alignés sur le serveur). */
+const ACCEPT_IMAGES = 'image/png,image/jpeg,image/gif,image/webp';
+const ACCEPT_FILES = '.png,.jpg,.jpeg,.gif,.webp,.pdf,.txt,.csv,.json,.odt,.ods,.odp,image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/csv,application/json,application/vnd.oasis.opendocument.text,application/vnd.oasis.opendocument.spreadsheet,application/vnd.oasis.opendocument.presentation';
+
+/**
+ * Envoie un data-URI à /api/upload (images + documents allowlistés serveur).
+ * @returns {Promise<{url:string,ext:string,kind:string,size:number,filename:string}>}
+ */
+async function uploadDataUri(data, caseId, filename) {
+  const res = await fetch('/api/upload', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data, caseId, filename }),
+  });
+  const json = await res.json();
+  if (!json.url) {
+    const err = new Error(json.error || 'Upload failed');
+    err.code = json.code;
+    throw err;
+  }
+  return json;
+}
+
+function readFileAsDataUri(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(new Error('FileReader failed'));
+    r.readAsDataURL(file);
+  });
+}
 
 /**
  * EntityPanel - Right panel for entity and link editing.
@@ -179,6 +212,62 @@ function EntityView({ entity, t, updateEntity, deleteEntity, duplicateEntity, li
 
   const upMeta = (patch) => updateEntity(selectedId, { metadata: { ...meta, ...patch } });
 
+  /** Applique le résultat d'upload : photo si image, + entrée dans metadata.files. */
+  const applyUpload = useCallback((json, originalName, currentMeta, currentEntity) => {
+    const m = currentMeta || {};
+    const entry = {
+      url: json.url,
+      name: json.filename || originalName || json.url,
+      ext: json.ext,
+      size: json.size,
+      kind: json.kind,
+    };
+    const files = [...(Array.isArray(m.files) ? m.files : []), entry];
+    if (json.kind === 'image') {
+      updateEntity(selectedId, { metadata: { ...m, photo: json.url, files } });
+    } else {
+      updateEntity(selectedId, { metadata: { ...m, files } });
+      if ((currentEntity?.type === 'document' || currentEntity?.subtype === 'doc_other' || currentEntity?.subtype === 'document') && !currentEntity?.description) {
+        updateEntity(selectedId, { description: json.url });
+      }
+    }
+  }, [selectedId, updateEntity]);
+
+  // Ctrl+V / Cmd+V : coller une capture d'écran depuis le presse-papiers → photo de l'entité.
+  useEffect(() => {
+    if (isViewer || !selectedId || !caseId) return undefined;
+    const onPaste = async (e) => {
+      const tag = (e.target?.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || e.target?.isContentEditable) return;
+      const items = e.clipboardData?.items;
+      if (!items?.length) return;
+      let imageFile = null;
+      for (const item of items) {
+        if (item.kind === 'file' && item.type.startsWith('image/')) {
+          if (item.type === 'image/svg+xml') continue;
+          imageFile = item.getAsFile();
+          if (imageFile) break;
+        }
+      }
+      if (!imageFile) return;
+      e.preventDefault();
+      try {
+        if (imageFile.size > 10 * 1024 * 1024) {
+          alert(tr('panneau.imageTropLourde'));
+          return;
+        }
+        const data = await readFileAsDataUri(imageFile);
+        const json = await uploadDataUri(data, caseId, imageFile.name || 'clipboard.png');
+        applyUpload(json, imageFile.name || 'clipboard.png', meta, entity);
+        logAction?.(tr('panneau.imageCollee'));
+      } catch (err) {
+        alert(tr('panneau.erreur', { message: err.message }));
+      }
+    };
+    window.addEventListener('paste', onPaste);
+    return () => window.removeEventListener('paste', onPaste);
+  }, [isViewer, selectedId, caseId, applyUpload, tr, logAction, meta, entity]);
+
   // Plugin tabs (entity-tab hook)
   const pluginTabs = useMemo(() => {
     if (!pluginEngine) return [];
@@ -319,11 +408,62 @@ function EntityView({ entity, t, updateEntity, deleteEntity, duplicateEntity, li
         <Section t={t} title={tr('panneau.section.media')} icon="🖼️">
           {/* Photo */}
           <Fl label={tr('panneau.champ.photo')} t={t}><input value={meta.photo?.startsWith('/api/') ? meta.photo : (meta.photo || '')} readOnly={isViewer} onChange={e => upMeta({ photo: e.target.value })} placeholder={tr('panneau.ph.url')} style={inp(t)} /></Fl>
-          <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-            {!isViewer && <button onClick={() => { const fi = document.createElement('input'); fi.type = 'file'; fi.accept = 'image/*'; fi.onchange = async e => { const f = e.target.files[0]; if (!f) return; if (f.size > 10 * 1024 * 1024) { alert(tr('panneau.imageTropLourde')); return; } const r = new FileReader(); r.onload = async () => { try { const res = await fetch('/api/upload', { method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: r.result, caseId }) }); const json = await res.json(); if (json.url) upMeta({ photo: json.url }); else alert(json.error || tr('panneau.erreurUpload')); } catch (err) { alert(tr('panneau.erreur', { message: err.message })); } }; r.readAsDataURL(f); }; fi.click(); }} style={{ padding: '6px 12px', background: t.accent, color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>📷 {tr('panneau.importerImage')}</button>}
-            {meta.photo && !isViewer && <button onClick={() => upMeta({ photo: '' })} style={{ padding: '6px 8px', background: '#ef444420', color: '#ef4444', border: '1px solid #ef444440', borderRadius: 6, cursor: 'pointer', fontSize: 11 }}>✕ {tr('panneau.supprimer')}</button>}
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            {!isViewer && <button type="button" onClick={() => {
+              const fi = document.createElement('input');
+              fi.type = 'file';
+              fi.accept = ACCEPT_IMAGES;
+              fi.onchange = async (e) => {
+                const f = e.target.files[0];
+                if (!f) return;
+                if (f.size > 10 * 1024 * 1024) { alert(tr('panneau.imageTropLourde')); return; }
+                try {
+                  const data = await readFileAsDataUri(f);
+                  const json = await uploadDataUri(data, caseId, f.name);
+                  applyUpload(json, f.name, meta, entity);
+                } catch (err) {
+                  alert(tr('panneau.erreur', { message: err.message }));
+                }
+              };
+              fi.click();
+            }} style={{ padding: '6px 12px', background: t.accent, color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>📷 {tr('panneau.importerImage')}</button>}
+            {meta.photo && !isViewer && <button type="button" onClick={() => upMeta({ photo: '' })} style={{ padding: '6px 8px', background: '#ef444420', color: '#ef4444', border: '1px solid #ef444440', borderRadius: 6, cursor: 'pointer', fontSize: 11 }}>✕ {tr('panneau.supprimer')}</button>}
           </div>
-          {meta.photo && <img src={meta.photo} style={{ width: '100%', borderRadius: 8, maxHeight: 150, objectFit: 'cover', marginTop: 6 }} onError={e => e.target.style.display = 'none'} />}
+          {meta.photo && <img src={meta.photo} alt="" style={{ width: '100%', borderRadius: 8, maxHeight: 150, objectFit: 'cover', marginTop: 6 }} onError={e => { e.target.style.display = 'none'; }} />}
+          {!isViewer && <div style={{ fontSize: 9, color: t.textMuted, marginTop: 4 }}>{tr('panneau.collerHint')}</div>}
+
+          {/* Fichiers joints (PDF, ODS, JSON…) — allowlist serveur + signatures */}
+          <Fl label={tr('panneau.champ.fichiers')} t={t}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 6 }}>
+              {(Array.isArray(meta.files) ? meta.files : []).map((f, idx) => (
+                <div key={(f.url || '') + idx} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 8px', background: t.surfaceAlt, borderRadius: 6, fontSize: 11 }}>
+                  <span>📄</span>
+                  <a href={f.url} target="_blank" rel="noopener noreferrer" style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: t.accent, fontWeight: 600, textDecoration: 'none' }}>{f.name || f.url || '?'}</a>
+                  <span style={{ fontSize: 9, color: t.textMuted }}>{(f.ext || '').toUpperCase()}</span>
+                  {!isViewer && <button type="button" onClick={() => upMeta({ files: (meta.files || []).filter((_, i) => i !== idx) })} style={{ padding: '2px 6px', background: 'transparent', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 11 }} title={tr('panneau.supprimer')}>✕</button>}
+                </div>
+              ))}
+            </div>
+            {!isViewer && <button type="button" onClick={() => {
+              const fi = document.createElement('input');
+              fi.type = 'file';
+              fi.accept = ACCEPT_FILES;
+              fi.onchange = async (e) => {
+                const f = e.target.files[0];
+                if (!f) return;
+                if (f.size > 25 * 1024 * 1024) { alert(tr('panneau.fichierTropLourd')); return; }
+                try {
+                  const data = await readFileAsDataUri(f);
+                  const json = await uploadDataUri(data, caseId, f.name);
+                  applyUpload(json, f.name, meta, entity);
+                } catch (err) {
+                  alert(tr('panneau.erreur', { message: err.message }));
+                }
+              };
+              fi.click();
+            }} style={{ width: '100%', padding: '8px 12px', background: t.accent, color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>📎 {tr('panneau.importerFichier')}</button>}
+            <div style={{ fontSize: 9, color: t.textMuted, marginTop: 4 }}>{tr('panneau.fichiersHint')}</div>
+          </Fl>
 
           {/* Attachments - creates linked proof entities */}
           <Fl label={tr('panneau.champ.piecesJointes')} t={t}>

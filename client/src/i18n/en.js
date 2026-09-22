@@ -177,6 +177,7 @@ export default {
   'graphe.code': 'Code: ',
   'graphe.doubleClic': 'Double-click…',
   'panneau.imageTropLourde': 'Image too large (max 10 MB)',
+  'panneau.fichierTropLourd': 'File too large (max 25 MB)',
   'panneau.erreur': 'Error: {message}',
   'graphe.aideCanvas': 'Wheel = zoom · Drag = pan · Hold / Shift+Drag = link · Double-click = rename',
   'graphe.lectureSeuleAide': 'You cannot change this graph. Ask a moderator to switch your role to editor.',
@@ -511,6 +512,11 @@ export default {
 
   // ── Entity panel actions ──────────────────────────────────────────────────
   'panneau.importerImage': 'Import an image',
+  'panneau.importerFichier': 'Import a file',
+  'panneau.champ.fichiers': 'Attached files',
+  'panneau.fichiersHint': 'Allowed: PDF, TXT, CSV, JSON, ODT/ODS/ODP, PNG/JPG/GIF/WEBP. Executables and scripts are rejected.',
+  'panneau.collerHint': 'Tip: select the entity then Ctrl+V / Cmd+V to paste a screenshot.',
+  'panneau.imageCollee': 'Image pasted from clipboard',
   'panneau.attacherPreuve': 'Attach evidence',
   'panneau.geolocaliser': 'Geolocate from the address',
   'panneau.supprimer': 'Delete',
